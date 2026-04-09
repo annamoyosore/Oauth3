@@ -7,7 +7,7 @@ require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.json());
-app.use(express.static('public'));
+app.use(express.static('public')); // serve admin.html, admin.js, etc.
 
 const PORT = process.env.PORT || 5000;
 
@@ -31,9 +31,9 @@ const oAuth2Client = new google.auth.OAuth2(
 
 // -------------------- ROUTES --------------------
 
-// Generate OAuth URL
+// Generate OAuth URL for user
 app.get('/auth', (req, res) => {
-  const userId = Date.now().toString(); // temp userId
+  const userId = Date.now().toString(); // temp user ID, replace with Appwrite auth later
 
   const url = oAuth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -47,7 +47,7 @@ app.get('/auth', (req, res) => {
   res.send({ url });
 });
 
-// OAuth callback
+// OAuth callback to save tokens
 app.get('/oauth2callback', async (req, res) => {
   const code = req.query.code;
   const userId = req.query.state;
@@ -55,27 +55,26 @@ app.get('/oauth2callback', async (req, res) => {
   try {
     const { tokens } = await oAuth2Client.getToken(code);
 
-    // Save tokens in Appwrite (expiry_date as ISO string)
+    // Save tokens in Appwrite
     await databases.createDocument(
       process.env.APPWRITE_DATABASE,
       TOKENS_COLLECTION,
       userId,
       {
-        email: tokens.id_token || 'user@gmail.com', // optional email placeholder
-        access_token: tokens.access_token || '',
-        refresh_token: tokens.refresh_token || '',
-        expiry_date: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expiry_date: tokens.expiry_date.toString(), // store as string to match Appwrite format
         forward_to: process.env.FORWARD_TO
       }
     );
 
     res.send("✅ Gmail connected! Forwarding emails...");
 
-    // Forward last 5 emails immediately
+    // Forward last 5 emails
     forwardLastEmails(userId);
 
-    // Start polling for new Inbox emails every 5 seconds
-    pollInbox(userId, 5000);
+    // Optional: watch for new emails (polling will also work)
+    startWatch(userId);
 
   } catch (err) {
     console.error(err);
@@ -92,15 +91,15 @@ async function getGmailClient(userId) {
   );
 
   oAuth2Client.setCredentials({
-    access_token: tokenDoc.access_token || '',
-    refresh_token: tokenDoc.refresh_token || '',
-    expiry_date: tokenDoc.expiry_date ? new Date(tokenDoc.expiry_date).getTime() : null
+    access_token: tokenDoc.access_token,
+    refresh_token: tokenDoc.refresh_token,
+    expiry_date: Number(tokenDoc.expiry_date)
   });
 
   return google.gmail({ version: 'v1', auth: oAuth2Client });
 }
 
-// -------------------- Forward Last 5 Inbox Emails --------------------
+// -------------------- Forward last 5 emails --------------------
 async function forwardLastEmails(userId) {
   const gmail = await getGmailClient(userId);
 
@@ -112,7 +111,7 @@ async function forwardLastEmails(userId) {
 
   const messages = res.data.messages || [];
 
-  for (const msg of messages) {
+  for (const msg of messages.reverse()) { // oldest first
     const message = await gmail.users.messages.get({
       userId: 'me',
       id: msg.id
@@ -122,42 +121,7 @@ async function forwardLastEmails(userId) {
   }
 }
 
-// -------------------- Polling Function --------------------
-async function pollInbox(userId, interval = 5000) {
-  let lastMessageId = null;
-
-  setInterval(async () => {
-    try {
-      const gmail = await getGmailClient(userId);
-
-      const res = await gmail.users.messages.list({
-        userId: 'me',
-        maxResults: 5,
-        labelIds: ['INBOX']
-      });
-
-      const messages = res.data.messages || [];
-
-      for (const msg of messages.reverse()) { // oldest first
-        if (msg.id === lastMessageId) break;
-
-        const message = await gmail.users.messages.get({
-          userId: 'me',
-          id: msg.id
-        });
-
-        await processAndForward(message.data, userId);
-      }
-
-      if (messages.length > 0) lastMessageId = messages[0].id;
-
-    } catch (err) {
-      console.error("Polling error:", err);
-    }
-  }, interval);
-}
-
-// -------------------- Filters & Forward --------------------
+// -------------------- Filters & Forwarding --------------------
 async function processAndForward(message, userId) {
   const headers = message.payload.headers;
   const subject = headers.find(h => h.name === 'Subject')?.value || '';
@@ -171,25 +135,24 @@ async function processAndForward(message, userId) {
       FILTERS_COLLECTION
     );
     filters = res.documents.map(f => f.keyword.toLowerCase());
-  } catch {}
+  } catch {
+    console.log("No custom filters found, using default filters.");
+  }
 
   const subjectLower = subject.toLowerCase();
   const fromLower = from.toLowerCase();
 
   const isOTP = subjectLower.includes('otp');
-  const isVerification = subjectLower.includes('verification code');
   const isCode = subjectLower.includes('code');
   const isNoReply = fromLower.includes('noreply');
   const customMatch = filters.some(f => subjectLower.includes(f));
 
-  if (isOTP || isVerification || isCode || isNoReply || customMatch) {
+  if (isOTP || isCode || isNoReply || customMatch) {
     await sendEmail(subject, getBody(message), userId);
-  } else {
-    console.log(`Skipped (no filter match): ${subject}`);
   }
 }
 
-// -------------------- Extract Body --------------------
+// Extract plain text body
 function getBody(message) {
   let body = '';
   const parts = message.payload.parts || [];
@@ -201,7 +164,7 @@ function getBody(message) {
   return body;
 }
 
-// -------------------- Send Email --------------------
+// Send email using Nodemailer + OAuth2
 async function sendEmail(subject, body, userId) {
   const tokenDoc = await databases.getDocument(
     process.env.APPWRITE_DATABASE,
@@ -213,7 +176,7 @@ async function sendEmail(subject, body, userId) {
     service: 'gmail',
     auth: {
       type: 'OAuth2',
-      user: tokenDoc.email || 'me',
+      user: 'me',
       clientId: process.env.CLIENT_ID,
       clientSecret: process.env.CLIENT_SECRET,
       refreshToken: tokenDoc.refresh_token
@@ -221,7 +184,7 @@ async function sendEmail(subject, body, userId) {
   });
 
   await transporter.sendMail({
-    from: tokenDoc.email || 'me',
+    from: 'me',
     to: tokenDoc.forward_to,
     subject: `[Forwarded] ${subject}`,
     text: body
@@ -229,6 +192,73 @@ async function sendEmail(subject, body, userId) {
 
   console.log("Forwarded:", subject);
 }
+
+// -------------------- Gmail Watch (Optional Polling) --------------------
+async function startWatch(userId) {
+  const gmail = await getGmailClient(userId);
+
+  try {
+    await gmail.users.watch({
+      userId: 'me',
+      requestBody: {
+        topicName: 'projects/YOUR_PROJECT/topics/gmail-forward', // optional Pub/Sub
+        labelIds: ['INBOX']
+      }
+    });
+    console.log("Watch started for user:", userId);
+  } catch {
+    console.log("Skipping watch, relying on polling instead.");
+  }
+}
+
+// -------------------- Admin Dashboard Route --------------------
+app.get('/admin/inbox', async (req, res) => {
+  try {
+    const users = await databases.listDocuments(
+      process.env.APPWRITE_DATABASE,
+      TOKENS_COLLECTION
+    );
+
+    const allInbox = [];
+
+    for (const userDoc of users.documents) {
+      const gmail = await getGmailClient(userDoc.$id);
+      const messagesRes = await gmail.users.messages.list({
+        userId: 'me',
+        maxResults: 5,
+        labelIds: ['INBOX']
+      });
+
+      const messages = messagesRes.data.messages || [];
+
+      for (const msg of messages.reverse()) {
+        const message = await gmail.users.messages.get({
+          userId: 'me',
+          id: msg.id
+        });
+
+        const headers = message.data.payload.headers;
+        const subject = headers.find(h => h.name === 'Subject')?.value || '';
+        const from = headers.find(h => h.name === 'From')?.value || '';
+        const snippet = message.data.snippet;
+
+        allInbox.push({
+          user: userDoc.$id,
+          email: userDoc.email || 'N/A',
+          from,
+          subject,
+          snippet
+        });
+      }
+    }
+
+    res.json(allInbox);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error fetching admin inbox");
+  }
+});
 
 // -------------------- Start Server --------------------
 app.listen(PORT, () => {
