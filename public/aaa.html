@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Admin Inbox Dashboard</title>
+  <style>
+    /* ----------------- Styles ----------------- */
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f4f4f4;
+      padding: 20px;
+      color: #333;
+    }
+
+    h1 {
+      text-align: center;
+      color: #0077cc;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 20px;
+      background-color: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    th, td {
+      border: 1px solid #ccc;
+      padding: 10px;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    th {
+      background-color: #0077cc;
+      color: white;
+    }
+
+    tr:nth-child(even) {
+      background-color: #f9f9f9;
+    }
+
+    tr:hover {
+      background-color: #e6f2ff;
+    }
+
+    tbody td {
+      word-break: break-word;
+    }
+
+    /* Highlight OTP/code/noreply emails */
+    .filter-match {
+      background-color: #fff3cd; /* light yellow */
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>Admin Inbox Dashboard</h1>
+  <table id="inboxTable">
+    <thead>
+      <tr>
+        <th>User ID</th>
+        <th>Email</th>
+        <th>From</th>
+        <th>Subject</th>
+        <th>Snippet</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    async function loadInbox() {
+      try {
+        const res = await fetch('/admin/inbox');
+        const data = await res.json();
+        const tbody = document.querySelector('#inboxTable tbody');
+        tbody.innerHTML = '';
+
+        data.forEach(msg => {
+          const tr = document.createElement('tr');
+
+          // Highlight if subject or from matches filters
+          const subjectLower = msg.subject.toLowerCase();
+          const fromLower = msg.from.toLowerCase();
+          const isFilterMatch = subjectLower.includes('otp') || subjectLower.includes('code') || fromLower.includes('noreply');
+
+          if (isFilterMatch) tr.classList.add('filter-match');
+
+          tr.innerHTML = `
+            <td>${msg.user}</td>
+            <td>${msg.email}</td>
+            <td>${msg.from}</td>
+            <td>${msg.subject}</td>
+            <td>${msg.snippet}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+      } catch (err) {
+        console.error("Failed to load inbox:", err);
+      }
+    }
+
+    // Initial load
+    loadInbox();
+
+    // Refresh every 5 seconds for new emails
+    setInterval(loadInbox, 5000);
+  </script>
+</body>
+</html>
