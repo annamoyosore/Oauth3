@@ -1,3 +1,4 @@
+{
 "name": "multi-user-mail-forwarder",
   "version": "1.0.0",
   "description": "Forward last 5 emails and new emails for multiple users with Appwrite",
